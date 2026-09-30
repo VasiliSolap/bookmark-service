@@ -212,3 +212,53 @@ def test_random_input_never_500(client):
         path = rng.choice(["/bookmarks/", "/bookmarks?limit=", "/bookmarks?cursor="]) + quote(str(value()), safe="")
         r = client.get(path)
         assert r.status_code < 500, (path, r.text)
+
+
+# ---------- search ----------
+
+def test_search_matches_title_or_url_case_insensitively(client):
+    a = create(client, {"url": "https://docs.python.org/3/", "title": "Python docs"}).json()
+    b = create(client, {"url": "https://fastapi.tiangolo.com/", "title": "FastAPI"}).json()
+    create(client, {"url": "https://example.com/", "title": "Something else"})
+
+    assert [x["id"] for x in client.get("/bookmarks", params={"q": "PYTHON"}).json()["items"]] == [a["id"]]
+    assert [x["id"] for x in client.get("/bookmarks", params={"q": "tiangolo"}).json()["items"]] == [b["id"]]
+    assert client.get("/bookmarks", params={"q": "nothing like this"}).json()["items"] == []
+
+
+def test_search_treats_wildcards_literally(client):
+    create(client, {"url": "https://a.com/1", "title": "100% free"})
+    create(client, {"url": "https://a.com/2", "title": "1000 things"})
+    create(client, {"url": "https://a.com/3", "title": "snake_case"})
+    create(client, {"url": "https://a.com/4", "title": "snakeXcase"})
+
+    assert [x["title"] for x in client.get("/bookmarks", params={"q": "100%"}).json()["items"]] == ["100% free"]
+    assert [x["title"] for x in client.get("/bookmarks", params={"q": "e_c"}).json()["items"]] == ["snake_case"]
+
+
+def test_search_only_sees_own_bookmarks(client):
+    create(client, {"url": "https://a.com/", "title": "shared word"})
+    r = client.get("/bookmarks", params={"q": "shared"}, headers={"X-User-Id": "bob"})
+    assert r.json()["items"] == []
+
+
+def test_search_paginates(client):
+    for i in range(5):
+        create(client, {"url": f"https://a.com/{i}", "title": f"match {i}"})
+    create(client, {"url": "https://b.com/", "title": "other"})
+    page1 = client.get("/bookmarks", params={"q": "match", "limit": 3}).json()
+    page2 = client.get("/bookmarks", params={"q": "match", "limit": 3, "cursor": page1["next_cursor"]}).json()
+    titles = [x["title"] for x in page1["items"] + page2["items"]]
+    assert titles == [f"match {i}" for i in range(4, -1, -1)]
+
+
+@pytest.mark.parametrize("q, message", [
+    ("", "q must not be empty"),
+    ("   ", "q must not be empty"),
+    ("x" * 201, "q must be at most 200 characters"),
+    ("a\x01b", "q must not contain control characters"),
+])
+def test_bad_search_is_400_naming_q(client, q, message):
+    r = client.get("/bookmarks", params={"q": q})
+    assert r.status_code == 400
+    assert r.json()["error"] == {"code": "validation_error", "field": "q", "message": message}

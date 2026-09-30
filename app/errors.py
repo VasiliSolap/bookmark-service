@@ -47,6 +47,8 @@ def _message(err: dict, field: str) -> str:
         return "request body must be a JSON object"
     if kind == "string_type":
         return f"{field} must be a string"
+    if kind == "string_too_long" and "max_length" in ctx:
+        return f"{field} must be at most {ctx['max_length']} characters"
     if kind == "extra_forbidden":
         return f"{field} is not an allowed field"
     if kind in ("int_parsing", "int_type", "int_from_float"):

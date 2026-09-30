@@ -30,7 +30,7 @@ export TEST_DATABASE_URL=postgresql://app:app@localhost:5432/bookmarks_test
 pytest -q
 ```
 
-55 tests run against a real PostgreSQL (also in GitHub Actions on every push). They cover every
+63 tests run against a real PostgreSQL (also in GitHub Actions on every push). They cover every
 malformed input listed below, repeated and concurrent creates, access to another user's rows, and a
 fuzz test that sends 300 random bodies and paths and fails on any 5xx.
 
@@ -45,7 +45,7 @@ It is a stand-in for real authentication, which is out of scope for this task. I
 | Method | Path | Success | Errors |
 |---|---|---|---|
 | `POST` | `/bookmarks` | **201** created, or **200** if the caller already saved this URL (the existing bookmark is returned) | 400, 401 |
-| `GET` | `/bookmarks?limit=50&cursor=<id>` | **200** `{"items": [...], "next_cursor": id or null}`, newest first | 400, 401 |
+| `GET` | `/bookmarks?limit=50&cursor=<id>&q=<text>` | **200** `{"items": [...], "next_cursor": id or null}`, newest first | 400, 401 |
 | `GET` | `/bookmarks/{id}` | **200** the bookmark | 400, 401, 404 |
 | `DELETE` | `/bookmarks/{id}` | **204** no body | 400, 401, 404 |
 | `GET` | `/health` | **200** `{"status": "ok"}` (checks the database) | — |
@@ -57,6 +57,9 @@ Request body for `POST /bookmarks`:
 ```
 
 `limit` is 1–100 (default 50). `cursor` is the `next_cursor` from the previous page.
+`q` (optional, 1–200 characters) keeps only bookmarks whose title or URL contains the text,
+ignoring case. `%` and `_` in `q` are matched literally, not as SQL wildcards, so searching for
+`100%` does not match `1000`. Search and pagination combine: pass the same `q` with each `cursor`.
 Cursor pagination is used instead of offsets so a bookmark added while you page does not shift or repeat entries.
 
 A bookmark owned by someone else returns **404**, the same as one that does not exist,
@@ -72,7 +75,7 @@ Every error, from any endpoint, has the same shape:
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `validation_error` | Anything the caller sent is wrong. `field` names what: `url`, `title`, `body`, `id`, `limit`, `cursor` or `X-User-Id` |
+| 400 | `validation_error` | Anything the caller sent is wrong. `field` names what: `url`, `title`, `body`, `id`, `limit`, `cursor`, `q` or `X-User-Id` |
 | 401 | `unauthenticated` | `X-User-Id` is missing |
 | 404 | `not_found` | No such bookmark for this caller, or no such route |
 | 405 | `method_not_allowed` | e.g. `PUT /bookmarks` |

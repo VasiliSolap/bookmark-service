@@ -71,8 +71,15 @@ def create_bookmark(payload: Annotated[BookmarkCreate, Body()], user: User,
 @app.get("/bookmarks", response_model=BookmarkList)
 def list_bookmarks(user: User, request: Request,
                    limit: Annotated[int, Query(ge=1, le=100)] = 50,
-                   cursor: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None):
-    rows = db.list_for_owner(request.app.state.pool, user, limit, cursor)
+                   cursor: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+                   q: Annotated[str | None, Query(max_length=200)] = None):
+    if q is not None:
+        q = q.strip()
+        if not q:
+            raise ApiError(400, "validation_error", "q must not be empty", "q")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in q):
+            raise ApiError(400, "validation_error", "q must not contain control characters", "q")
+    rows = db.list_for_owner(request.app.state.pool, user, limit, cursor, q)
     next_cursor = rows[-1]["id"] if len(rows) == limit else None
     return {"items": rows, "next_cursor": next_cursor}
 
