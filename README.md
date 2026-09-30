@@ -30,7 +30,7 @@ export TEST_DATABASE_URL=postgresql://app:app@localhost:5432/bookmarks_test
 pytest -q
 ```
 
-55 tests run against a real PostgreSQL (also in GitHub Actions on every push). They cover every
+80 tests run against a real PostgreSQL (also in GitHub Actions on every push). They cover every
 malformed input listed below, repeated and concurrent creates, access to another user's rows, and a
 fuzz test that sends 300 random bodies and paths and fails on any 5xx.
 
@@ -45,8 +45,9 @@ It is a stand-in for real authentication, which is out of scope for this task. I
 | Method | Path | Success | Errors |
 |---|---|---|---|
 | `POST` | `/bookmarks` | **201** created, or **200** if the caller already saved this URL (the existing bookmark is returned) | 400, 401 |
-| `GET` | `/bookmarks?limit=50&cursor=<id>` | **200** `{"items": [...], "next_cursor": id or null}`, newest first | 400, 401 |
+| `GET` | `/bookmarks?limit=50&cursor=<id>&q=<text>` | **200** `{"items": [...], "next_cursor": id or null}`, newest first | 400, 401 |
 | `GET` | `/bookmarks/{id}` | **200** the bookmark | 400, 401, 404 |
+| `PATCH` | `/bookmarks/{id}` `{"title": "..."}` | **200** the updated bookmark; `{"title": null}` clears it | 400, 401, 404 |
 | `DELETE` | `/bookmarks/{id}` | **204** no body | 400, 401, 404 |
 | `GET` | `/health` | **200** `{"status": "ok"}` (checks the database) | — |
 
@@ -57,7 +58,15 @@ Request body for `POST /bookmarks`:
 ```
 
 `limit` is 1–100 (default 50). `cursor` is the `next_cursor` from the previous page.
+`q` (optional, 1–200 characters) keeps only bookmarks whose title or URL contains the text,
+ignoring case. `%` and `_` in `q` are matched literally, not as SQL wildcards, so searching for
+`100%` does not match `1000`. Search and pagination combine: pass the same `q` with each `cursor`.
 Cursor pagination is used instead of offsets so a bookmark added while you page does not shift or repeat entries.
+
+`PATCH` changes only the title. The URL cannot be edited because it is the bookmark's identity
+(see [How repeats are recognised](#how-repeats-are-recognised)): changing it could silently turn
+one bookmark into a duplicate of another. To bookmark a different URL, create a new one. Sending
+the same `PATCH` twice leaves the same result.
 
 A bookmark owned by someone else returns **404**, the same as one that does not exist,
 so the API does not reveal which ids are taken.
@@ -72,7 +81,7 @@ Every error, from any endpoint, has the same shape:
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `validation_error` | Anything the caller sent is wrong. `field` names what: `url`, `title`, `body`, `id`, `limit`, `cursor` or `X-User-Id` |
+| 400 | `validation_error` | Anything the caller sent is wrong. `field` names what: `url`, `title`, `body`, `id`, `limit`, `cursor`, `q` or `X-User-Id` |
 | 401 | `unauthenticated` | `X-User-Id` is missing |
 | 404 | `not_found` | No such bookmark for this caller, or no such route |
 | 405 | `method_not_allowed` | e.g. `PUT /bookmarks` |
@@ -98,6 +107,20 @@ Unknown fields (a typo like `"ulr"`) are rejected rather than silently ignored.
 Strings are type-checked strictly (no silent `42` → `"42"`), lengths are capped below the column
 constraints, NUL bytes (which PostgreSQL rejects) are refused up front, and path/query integers are
 bounded to the `BIGINT` range. All SQL is parameterised.
+
+## Request IDs and logs
+
+Every response carries an `X-Request-ID` header, and every request writes one log line:
+
+```
+2026-09-30 10:15:02 INFO bookmarks.access request_id=4f1c…e9 method=POST path=/bookmarks status=201 duration_ms=3.2
+```
+
+A 500 response quotes the same id (`"something went wrong on our side (ref 4f1c…e9)"`), and the
+stack trace is logged under it, so a user's bug report leads straight to the right log line
+without exposing internals. If the caller or a proxy sends its own `X-Request-ID` (up to 64
+characters: letters, digits, `.`, `_`, `-`), it is reused so one id can follow a request across
+services. Anything else is replaced with a fresh id rather than written into the logs.
 
 ## How repeats are recognised
 
@@ -130,7 +153,7 @@ both pass the check. With the constraint, the database picks exactly one winner;
 `test_concurrent_repeats_leave_one_row` fires 20 parallel creates and asserts one row, one 201.
 
 If the repeat carries a different `title`, the stored bookmark is returned unchanged:
-a create is not an update.
+a create is not an update. Use `PATCH` to change the title.
 
 ## Layout
 
@@ -139,6 +162,7 @@ app/main.py        routes and the X-User-Id check
 app/schemas.py     request/response models and field validation
 app/urls.py        URL validation and normalisation
 app/errors.py      one error shape for 400/401/404/405/500
+app/request_id.py  X-Request-ID header and the access log
 app/db.py          SQL (psycopg 3, connection pool)
 migrations/        schema
 tests/             pytest suite against PostgreSQL

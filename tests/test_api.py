@@ -212,3 +212,156 @@ def test_random_input_never_500(client):
         path = rng.choice(["/bookmarks/", "/bookmarks?limit=", "/bookmarks?cursor="]) + quote(str(value()), safe="")
         r = client.get(path)
         assert r.status_code < 500, (path, r.text)
+
+
+# ---------- search ----------
+
+def test_search_matches_title_or_url_case_insensitively(client):
+    a = create(client, {"url": "https://docs.python.org/3/", "title": "Python docs"}).json()
+    b = create(client, {"url": "https://fastapi.tiangolo.com/", "title": "FastAPI"}).json()
+    create(client, {"url": "https://example.com/", "title": "Something else"})
+
+    assert [x["id"] for x in client.get("/bookmarks", params={"q": "PYTHON"}).json()["items"]] == [a["id"]]
+    assert [x["id"] for x in client.get("/bookmarks", params={"q": "tiangolo"}).json()["items"]] == [b["id"]]
+    assert client.get("/bookmarks", params={"q": "nothing like this"}).json()["items"] == []
+
+
+def test_search_treats_wildcards_literally(client):
+    create(client, {"url": "https://a.com/1", "title": "100% free"})
+    create(client, {"url": "https://a.com/2", "title": "1000 things"})
+    create(client, {"url": "https://a.com/3", "title": "snake_case"})
+    create(client, {"url": "https://a.com/4", "title": "snakeXcase"})
+
+    assert [x["title"] for x in client.get("/bookmarks", params={"q": "100%"}).json()["items"]] == ["100% free"]
+    assert [x["title"] for x in client.get("/bookmarks", params={"q": "e_c"}).json()["items"]] == ["snake_case"]
+
+
+def test_search_only_sees_own_bookmarks(client):
+    create(client, {"url": "https://a.com/", "title": "shared word"})
+    r = client.get("/bookmarks", params={"q": "shared"}, headers={"X-User-Id": "bob"})
+    assert r.json()["items"] == []
+
+
+def test_search_paginates(client):
+    for i in range(5):
+        create(client, {"url": f"https://a.com/{i}", "title": f"match {i}"})
+    create(client, {"url": "https://b.com/", "title": "other"})
+    page1 = client.get("/bookmarks", params={"q": "match", "limit": 3}).json()
+    page2 = client.get("/bookmarks", params={"q": "match", "limit": 3, "cursor": page1["next_cursor"]}).json()
+    titles = [x["title"] for x in page1["items"] + page2["items"]]
+    assert titles == [f"match {i}" for i in range(4, -1, -1)]
+
+
+@pytest.mark.parametrize("q, message", [
+    ("", "q must not be empty"),
+    ("   ", "q must not be empty"),
+    ("x" * 201, "q must be at most 200 characters"),
+    ("a\x01b", "q must not contain control characters"),
+])
+def test_bad_search_is_400_naming_q(client, q, message):
+    r = client.get("/bookmarks", params={"q": q})
+    assert r.status_code == 400
+    assert r.json()["error"] == {"code": "validation_error", "field": "q", "message": message}
+
+
+# ---------- editing the title ----------
+
+def test_patch_changes_only_the_title(client):
+    b = create(client, {"url": URL, "title": "old"}).json()
+    r = client.patch(f"/bookmarks/{b['id']}", json={"title": "  new  "})
+    assert r.status_code == 200
+    assert r.json() == {**b, "title": "new"}
+    assert client.get(f"/bookmarks/{b['id']}").json()["title"] == "new"
+
+
+def test_patch_null_or_blank_clears_the_title(client):
+    b = create(client, {"url": URL, "title": "old"}).json()
+    assert client.patch(f"/bookmarks/{b['id']}", json={"title": None}).json()["title"] is None
+    client.patch(f"/bookmarks/{b['id']}", json={"title": "x"})
+    assert client.patch(f"/bookmarks/{b['id']}", json={"title": "   "}).json()["title"] is None
+
+
+def test_patch_is_idempotent(client, row_count):
+    b = create(client, {"url": URL}).json()
+    first = client.patch(f"/bookmarks/{b['id']}", json={"title": "same"}).json()
+    second = client.patch(f"/bookmarks/{b['id']}", json={"title": "same"}).json()
+    assert first == second
+    assert row_count() == 1
+
+
+def test_patch_someone_elses_bookmark_is_404(client):
+    b = create(client, {"url": URL, "title": "mine"}).json()
+    r = client.patch(f"/bookmarks/{b['id']}", json={"title": "hacked"}, headers={"X-User-Id": "bob"})
+    assert r.status_code == 404
+    assert client.get(f"/bookmarks/{b['id']}").json()["title"] == "mine"
+
+
+def test_patch_missing_bookmark_is_404(client):
+    assert client.patch("/bookmarks/999", json={"title": "x"}).status_code == 404
+
+
+@pytest.mark.parametrize("body, field, message", [
+    ({}, "title", "title is required"),
+    ({"title": 5}, "title", "title must be a string"),
+    ({"title": "t" * 201}, "title", "title must be at most 200 characters"),
+    ({"title": "x", "url": "https://other.com"}, "url", "url is not an allowed field"),
+])
+def test_bad_patch_is_400(client, body, field, message):
+    b = create(client, {"url": URL, "title": "keep"}).json()
+    r = client.patch(f"/bookmarks/{b['id']}", json=body)
+    assert r.status_code == 400
+    assert r.json()["error"]["field"] == field
+    assert r.json()["error"]["message"] == message
+    assert client.get(f"/bookmarks/{b['id']}").json()["title"] == "keep"
+
+
+# ---------- request ids ----------
+
+def test_every_response_has_a_request_id(client):
+    ids = {client.get("/bookmarks").headers["x-request-id"] for _ in range(3)}
+    assert len(ids) == 3  # a fresh id per request
+    assert client.get("/nope").headers["x-request-id"]                        # 404
+    assert client.post("/bookmarks", json={"url": ""}).headers["x-request-id"]  # 400
+
+
+def test_a_safe_incoming_request_id_is_reused(client):
+    r = client.get("/bookmarks", headers={"X-Request-ID": "trace-abc_123.x"})
+    assert r.headers["x-request-id"] == "trace-abc_123.x"
+
+
+@pytest.mark.parametrize("bad", ["has space", "a" * 65, "semi;colon", "new\\nline"])
+def test_an_unsafe_incoming_request_id_is_replaced(client, bad):
+    r = client.get("/bookmarks", headers={"X-Request-ID": bad})
+    assert r.headers["x-request-id"] != bad
+    assert len(r.headers["x-request-id"]) == 32
+
+
+def test_a_500_points_to_its_log_line(client, monkeypatch, caplog):
+    import logging
+
+    from app import db
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("database exploded")
+
+    monkeypatch.setattr(db, "get_for_owner", boom)
+    with caplog.at_level(logging.INFO):
+        r = client.get("/bookmarks/1", headers={"X-Request-ID": "find-me-42"})
+
+    assert r.status_code == 500
+    assert r.headers["x-request-id"] == "find-me-42"
+    assert "find-me-42" in r.json()["error"]["message"]
+    assert "database exploded" not in r.text  # details stay in the log
+    logged = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "unhandled error request_id=find-me-42" in logged
+    assert "request_id=find-me-42 method=GET path=/bookmarks/1 status=500" in logged
+
+
+def test_access_log_line_per_request(client, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="bookmarks.access"):
+        client.post("/bookmarks", json={"url": URL}, headers={"X-Request-ID": "log-me"})
+    lines = [rec.getMessage() for rec in caplog.records if rec.name == "bookmarks.access"]
+    assert len(lines) == 1
+    assert lines[0].startswith("request_id=log-me method=POST path=/bookmarks status=201 duration_ms=")

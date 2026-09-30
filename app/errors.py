@@ -47,6 +47,8 @@ def _message(err: dict, field: str) -> str:
         return "request body must be a JSON object"
     if kind == "string_type":
         return f"{field} must be a string"
+    if kind == "string_too_long" and "max_length" in ctx:
+        return f"{field} must be at most {ctx['max_length']} characters"
     if kind == "extra_forbidden":
         return f"{field} is not an allowed field"
     if kind in ("int_parsing", "int_type", "int_from_float"):
@@ -96,9 +98,11 @@ def install(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def on_unexpected(request: Request, exc: Exception):
         # Full detail goes to the log; the caller gets a reference, never a stack trace.
-        ref = uuid.uuid4().hex[:12]
-        log.exception("unhandled error ref=%s %s %s", ref, request.method, request.url.path)
+        # The reference is the request id, so the caller's error and the log line match.
+        ref = getattr(request.state, "request_id", None) or uuid.uuid4().hex
+        log.exception("unhandled error request_id=%s %s %s", ref, request.method, request.url.path)
         return JSONResponse(
             status_code=500,
             content=error_body("internal_error", f"something went wrong on our side (ref {ref})"),
+            headers={"X-Request-ID": ref},
         )

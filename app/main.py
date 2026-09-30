@@ -1,13 +1,21 @@
+import logging
 import re
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Body, Depends, FastAPI, Path, Query, Request, Response, status
 
-from . import db, errors
+from . import db, errors, request_id
 from .errors import ApiError
-from .schemas import Bookmark, BookmarkCreate, BookmarkList
+from .schemas import Bookmark, BookmarkCreate, BookmarkList, BookmarkUpdate
 from .urls import normalize_url
+
+_log = logging.getLogger("bookmarks")
+if not _log.handlers:  # uvicorn configures only its own loggers; make ours visible too
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    _log.addHandler(_handler)
+    _log.setLevel(logging.INFO)
 
 MAX_ID = 2**63 - 1  # Postgres BIGINT; larger ids are a 400, not a database error
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -27,6 +35,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Bookmark service", version="1.0.0", lifespan=lifespan)
 errors.install(app)
+request_id.install(app)
 
 
 def current_user(request: Request) -> str:
@@ -71,8 +80,15 @@ def create_bookmark(payload: Annotated[BookmarkCreate, Body()], user: User,
 @app.get("/bookmarks", response_model=BookmarkList)
 def list_bookmarks(user: User, request: Request,
                    limit: Annotated[int, Query(ge=1, le=100)] = 50,
-                   cursor: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None):
-    rows = db.list_for_owner(request.app.state.pool, user, limit, cursor)
+                   cursor: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+                   q: Annotated[str | None, Query(max_length=200)] = None):
+    if q is not None:
+        q = q.strip()
+        if not q:
+            raise ApiError(400, "validation_error", "q must not be empty", "q")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in q):
+            raise ApiError(400, "validation_error", "q must not contain control characters", "q")
+    rows = db.list_for_owner(request.app.state.pool, user, limit, cursor, q)
     next_cursor = rows[-1]["id"] if len(rows) == limit else None
     return {"items": rows, "next_cursor": next_cursor}
 
@@ -82,6 +98,15 @@ def get_bookmark(bookmark_id: BookmarkId, user: User, request: Request):
     row = db.get_for_owner(request.app.state.pool, user, bookmark_id)
     if row is None:
         # Same answer for "does not exist" and "belongs to someone else".
+        raise ApiError(404, "not_found", f"bookmark {bookmark_id} not found", "id")
+    return row
+
+
+@app.patch("/bookmarks/{bookmark_id}", response_model=Bookmark)
+def update_bookmark(bookmark_id: BookmarkId, payload: Annotated[BookmarkUpdate, Body()],
+                    user: User, request: Request):
+    row = db.update_title(request.app.state.pool, user, bookmark_id, payload.title)
+    if row is None:
         raise ApiError(404, "not_found", f"bookmark {bookmark_id} not found", "id")
     return row
 

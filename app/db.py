@@ -46,17 +46,27 @@ def insert_or_get(pool, owner_id: str, url: str, url_normalized: str, title: str
         return existing, False
 
 
-def list_for_owner(pool, owner_id: str, limit: int, cursor: int | None):
+def _like_pattern(text: str) -> str:
+    """Escape LIKE wildcards so a search for "100%" matches the literal text."""
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def list_for_owner(pool, owner_id: str, limit: int, cursor: int | None, q: str | None = None):
+    conditions = ["owner_id = %(owner)s"]
+    params = {"owner": owner_id, "limit": limit}
+    if cursor is not None:
+        conditions.append("id < %(cursor)s")
+        params["cursor"] = cursor
+    if q is not None:
+        # Case-insensitive substring match on the title or the URL.
+        conditions.append("(title ILIKE %(pattern)s OR url ILIKE %(pattern)s)")
+        params["pattern"] = _like_pattern(q)
     with pool.connection() as conn:
-        if cursor is None:
-            return conn.execute(
-                f"SELECT {COLUMNS} FROM bookmarks WHERE owner_id = %s ORDER BY id DESC LIMIT %s",
-                (owner_id, limit),
-            ).fetchall()
         return conn.execute(
-            f"""SELECT {COLUMNS} FROM bookmarks
-                WHERE owner_id = %s AND id < %s ORDER BY id DESC LIMIT %s""",
-            (owner_id, cursor, limit),
+            f"SELECT {COLUMNS} FROM bookmarks WHERE {' AND '.join(conditions)} "
+            "ORDER BY id DESC LIMIT %(limit)s",
+            params,
         ).fetchall()
 
 
@@ -65,6 +75,15 @@ def get_for_owner(pool, owner_id: str, bookmark_id: int):
         return conn.execute(
             f"SELECT {COLUMNS} FROM bookmarks WHERE id = %s AND owner_id = %s",
             (bookmark_id, owner_id),
+        ).fetchone()
+
+
+def update_title(pool, owner_id: str, bookmark_id: int, title: str | None):
+    with pool.connection() as conn:
+        return conn.execute(
+            f"""UPDATE bookmarks SET title = %s WHERE id = %s AND owner_id = %s
+                RETURNING {COLUMNS}""",
+            (title, bookmark_id, owner_id),
         ).fetchone()
 
 
