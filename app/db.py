@@ -78,6 +78,15 @@ def get_for_owner(pool, owner_id: str, bookmark_id: int):
         ).fetchone()
 
 
+def update_title(pool, owner_id: str, bookmark_id: int, title: str | None):
+    with pool.connection() as conn:
+        return conn.execute(
+            f"""UPDATE bookmarks SET title = %s WHERE id = %s AND owner_id = %s
+                RETURNING {COLUMNS}""",
+            (title, bookmark_id, owner_id),
+        ).fetchone()
+
+
 def delete_for_owner(pool, owner_id: str, bookmark_id: int) -> bool:
     with pool.connection() as conn:
         cur = conn.execute(

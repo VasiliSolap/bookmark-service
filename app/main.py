@@ -6,7 +6,7 @@ from fastapi import Body, Depends, FastAPI, Path, Query, Request, Response, stat
 
 from . import db, errors
 from .errors import ApiError
-from .schemas import Bookmark, BookmarkCreate, BookmarkList
+from .schemas import Bookmark, BookmarkCreate, BookmarkList, BookmarkUpdate
 from .urls import normalize_url
 
 MAX_ID = 2**63 - 1  # Postgres BIGINT; larger ids are a 400, not a database error
@@ -89,6 +89,15 @@ def get_bookmark(bookmark_id: BookmarkId, user: User, request: Request):
     row = db.get_for_owner(request.app.state.pool, user, bookmark_id)
     if row is None:
         # Same answer for "does not exist" and "belongs to someone else".
+        raise ApiError(404, "not_found", f"bookmark {bookmark_id} not found", "id")
+    return row
+
+
+@app.patch("/bookmarks/{bookmark_id}", response_model=Bookmark)
+def update_bookmark(bookmark_id: BookmarkId, payload: Annotated[BookmarkUpdate, Body()],
+                    user: User, request: Request):
+    row = db.update_title(request.app.state.pool, user, bookmark_id, payload.title)
+    if row is None:
         raise ApiError(404, "not_found", f"bookmark {bookmark_id} not found", "id")
     return row
 

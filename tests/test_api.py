@@ -262,3 +262,54 @@ def test_bad_search_is_400_naming_q(client, q, message):
     r = client.get("/bookmarks", params={"q": q})
     assert r.status_code == 400
     assert r.json()["error"] == {"code": "validation_error", "field": "q", "message": message}
+
+
+# ---------- editing the title ----------
+
+def test_patch_changes_only_the_title(client):
+    b = create(client, {"url": URL, "title": "old"}).json()
+    r = client.patch(f"/bookmarks/{b['id']}", json={"title": "  new  "})
+    assert r.status_code == 200
+    assert r.json() == {**b, "title": "new"}
+    assert client.get(f"/bookmarks/{b['id']}").json()["title"] == "new"
+
+
+def test_patch_null_or_blank_clears_the_title(client):
+    b = create(client, {"url": URL, "title": "old"}).json()
+    assert client.patch(f"/bookmarks/{b['id']}", json={"title": None}).json()["title"] is None
+    client.patch(f"/bookmarks/{b['id']}", json={"title": "x"})
+    assert client.patch(f"/bookmarks/{b['id']}", json={"title": "   "}).json()["title"] is None
+
+
+def test_patch_is_idempotent(client, row_count):
+    b = create(client, {"url": URL}).json()
+    first = client.patch(f"/bookmarks/{b['id']}", json={"title": "same"}).json()
+    second = client.patch(f"/bookmarks/{b['id']}", json={"title": "same"}).json()
+    assert first == second
+    assert row_count() == 1
+
+
+def test_patch_someone_elses_bookmark_is_404(client):
+    b = create(client, {"url": URL, "title": "mine"}).json()
+    r = client.patch(f"/bookmarks/{b['id']}", json={"title": "hacked"}, headers={"X-User-Id": "bob"})
+    assert r.status_code == 404
+    assert client.get(f"/bookmarks/{b['id']}").json()["title"] == "mine"
+
+
+def test_patch_missing_bookmark_is_404(client):
+    assert client.patch("/bookmarks/999", json={"title": "x"}).status_code == 404
+
+
+@pytest.mark.parametrize("body, field, message", [
+    ({}, "title", "title is required"),
+    ({"title": 5}, "title", "title must be a string"),
+    ({"title": "t" * 201}, "title", "title must be at most 200 characters"),
+    ({"title": "x", "url": "https://other.com"}, "url", "url is not an allowed field"),
+])
+def test_bad_patch_is_400(client, body, field, message):
+    b = create(client, {"url": URL, "title": "keep"}).json()
+    r = client.patch(f"/bookmarks/{b['id']}", json=body)
+    assert r.status_code == 400
+    assert r.json()["error"]["field"] == field
+    assert r.json()["error"]["message"] == message
+    assert client.get(f"/bookmarks/{b['id']}").json()["title"] == "keep"

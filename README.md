@@ -30,7 +30,7 @@ export TEST_DATABASE_URL=postgresql://app:app@localhost:5432/bookmarks_test
 pytest -q
 ```
 
-63 tests run against a real PostgreSQL (also in GitHub Actions on every push). They cover every
+72 tests run against a real PostgreSQL (also in GitHub Actions on every push). They cover every
 malformed input listed below, repeated and concurrent creates, access to another user's rows, and a
 fuzz test that sends 300 random bodies and paths and fails on any 5xx.
 
@@ -47,6 +47,7 @@ It is a stand-in for real authentication, which is out of scope for this task. I
 | `POST` | `/bookmarks` | **201** created, or **200** if the caller already saved this URL (the existing bookmark is returned) | 400, 401 |
 | `GET` | `/bookmarks?limit=50&cursor=<id>&q=<text>` | **200** `{"items": [...], "next_cursor": id or null}`, newest first | 400, 401 |
 | `GET` | `/bookmarks/{id}` | **200** the bookmark | 400, 401, 404 |
+| `PATCH` | `/bookmarks/{id}` `{"title": "..."}` | **200** the updated bookmark; `{"title": null}` clears it | 400, 401, 404 |
 | `DELETE` | `/bookmarks/{id}` | **204** no body | 400, 401, 404 |
 | `GET` | `/health` | **200** `{"status": "ok"}` (checks the database) | — |
 
@@ -61,6 +62,11 @@ Request body for `POST /bookmarks`:
 ignoring case. `%` and `_` in `q` are matched literally, not as SQL wildcards, so searching for
 `100%` does not match `1000`. Search and pagination combine: pass the same `q` with each `cursor`.
 Cursor pagination is used instead of offsets so a bookmark added while you page does not shift or repeat entries.
+
+`PATCH` changes only the title. The URL cannot be edited because it is the bookmark's identity
+(see [How repeats are recognised](#how-repeats-are-recognised)): changing it could silently turn
+one bookmark into a duplicate of another. To bookmark a different URL, create a new one. Sending
+the same `PATCH` twice leaves the same result.
 
 A bookmark owned by someone else returns **404**, the same as one that does not exist,
 so the API does not reveal which ids are taken.
@@ -133,7 +139,7 @@ both pass the check. With the constraint, the database picks exactly one winner;
 `test_concurrent_repeats_leave_one_row` fires 20 parallel creates and asserts one row, one 201.
 
 If the repeat carries a different `title`, the stored bookmark is returned unchanged:
-a create is not an update.
+a create is not an update. Use `PATCH` to change the title.
 
 ## Layout
 
