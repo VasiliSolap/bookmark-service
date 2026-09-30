@@ -1,13 +1,21 @@
+import logging
 import re
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Body, Depends, FastAPI, Path, Query, Request, Response, status
 
-from . import db, errors
+from . import db, errors, request_id
 from .errors import ApiError
 from .schemas import Bookmark, BookmarkCreate, BookmarkList, BookmarkUpdate
 from .urls import normalize_url
+
+_log = logging.getLogger("bookmarks")
+if not _log.handlers:  # uvicorn configures only its own loggers; make ours visible too
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    _log.addHandler(_handler)
+    _log.setLevel(logging.INFO)
 
 MAX_ID = 2**63 - 1  # Postgres BIGINT; larger ids are a 400, not a database error
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -27,6 +35,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Bookmark service", version="1.0.0", lifespan=lifespan)
 errors.install(app)
+request_id.install(app)
 
 
 def current_user(request: Request) -> str:

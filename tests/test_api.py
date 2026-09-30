@@ -313,3 +313,55 @@ def test_bad_patch_is_400(client, body, field, message):
     assert r.json()["error"]["field"] == field
     assert r.json()["error"]["message"] == message
     assert client.get(f"/bookmarks/{b['id']}").json()["title"] == "keep"
+
+
+# ---------- request ids ----------
+
+def test_every_response_has_a_request_id(client):
+    ids = {client.get("/bookmarks").headers["x-request-id"] for _ in range(3)}
+    assert len(ids) == 3  # a fresh id per request
+    assert client.get("/nope").headers["x-request-id"]                        # 404
+    assert client.post("/bookmarks", json={"url": ""}).headers["x-request-id"]  # 400
+
+
+def test_a_safe_incoming_request_id_is_reused(client):
+    r = client.get("/bookmarks", headers={"X-Request-ID": "trace-abc_123.x"})
+    assert r.headers["x-request-id"] == "trace-abc_123.x"
+
+
+@pytest.mark.parametrize("bad", ["has space", "a" * 65, "semi;colon", "new\\nline"])
+def test_an_unsafe_incoming_request_id_is_replaced(client, bad):
+    r = client.get("/bookmarks", headers={"X-Request-ID": bad})
+    assert r.headers["x-request-id"] != bad
+    assert len(r.headers["x-request-id"]) == 32
+
+
+def test_a_500_points_to_its_log_line(client, monkeypatch, caplog):
+    import logging
+
+    from app import db
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("database exploded")
+
+    monkeypatch.setattr(db, "get_for_owner", boom)
+    with caplog.at_level(logging.INFO):
+        r = client.get("/bookmarks/1", headers={"X-Request-ID": "find-me-42"})
+
+    assert r.status_code == 500
+    assert r.headers["x-request-id"] == "find-me-42"
+    assert "find-me-42" in r.json()["error"]["message"]
+    assert "database exploded" not in r.text  # details stay in the log
+    logged = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "unhandled error request_id=find-me-42" in logged
+    assert "request_id=find-me-42 method=GET path=/bookmarks/1 status=500" in logged
+
+
+def test_access_log_line_per_request(client, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="bookmarks.access"):
+        client.post("/bookmarks", json={"url": URL}, headers={"X-Request-ID": "log-me"})
+    lines = [rec.getMessage() for rec in caplog.records if rec.name == "bookmarks.access"]
+    assert len(lines) == 1
+    assert lines[0].startswith("request_id=log-me method=POST path=/bookmarks status=201 duration_ms=")

@@ -30,7 +30,7 @@ export TEST_DATABASE_URL=postgresql://app:app@localhost:5432/bookmarks_test
 pytest -q
 ```
 
-72 tests run against a real PostgreSQL (also in GitHub Actions on every push). They cover every
+80 tests run against a real PostgreSQL (also in GitHub Actions on every push). They cover every
 malformed input listed below, repeated and concurrent creates, access to another user's rows, and a
 fuzz test that sends 300 random bodies and paths and fails on any 5xx.
 
@@ -108,6 +108,20 @@ Strings are type-checked strictly (no silent `42` → `"42"`), lengths are cappe
 constraints, NUL bytes (which PostgreSQL rejects) are refused up front, and path/query integers are
 bounded to the `BIGINT` range. All SQL is parameterised.
 
+## Request IDs and logs
+
+Every response carries an `X-Request-ID` header, and every request writes one log line:
+
+```
+2026-09-30 10:15:02 INFO bookmarks.access request_id=4f1c…e9 method=POST path=/bookmarks status=201 duration_ms=3.2
+```
+
+A 500 response quotes the same id (`"something went wrong on our side (ref 4f1c…e9)"`), and the
+stack trace is logged under it, so a user's bug report leads straight to the right log line
+without exposing internals. If the caller or a proxy sends its own `X-Request-ID` (up to 64
+characters: letters, digits, `.`, `_`, `-`), it is reused so one id can follow a request across
+services. Anything else is replaced with a fresh id rather than written into the logs.
+
 ## How repeats are recognised
 
 **Rule: one bookmark per caller per normalised URL.** Sending the same create request twice
@@ -148,6 +162,7 @@ app/main.py        routes and the X-User-Id check
 app/schemas.py     request/response models and field validation
 app/urls.py        URL validation and normalisation
 app/errors.py      one error shape for 400/401/404/405/500
+app/request_id.py  X-Request-ID header and the access log
 app/db.py          SQL (psycopg 3, connection pool)
 migrations/        schema
 tests/             pytest suite against PostgreSQL
